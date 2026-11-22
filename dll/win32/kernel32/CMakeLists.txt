@@ -86,6 +86,7 @@ list(APPEND SOURCE
     client/thread.c
     client/ums.c
     client/vdm.c
+    client/vettv_vdm.c # VETTV: DOS/Win16 launch hook -> System32\vetvdm.exe (native and WoW64 i386 kernel32)
     client/version.c
     client/versionansi.c
     client/virtmem.c

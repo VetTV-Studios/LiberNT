@@ -49,6 +49,15 @@ RegisterWaitForInputIdle(WaitForInputIdleType lpfnRegisterWaitForInputIdle);
 
 #define CMD_STRING L"cmd /c "
 
+/* VetTV: launch hook (vettv_vdm.c). DOS/Win16 images go to System32\vetvdm.exe. */
+/* VETTV: one-shot Win32 retry; caller env, directory, and startup info stay. */
+BOOLEAN VetTvRedirectToVdm(IN LPCWSTR ImagePath, IN LPCWSTR CommandLine,
+                           IN LPCWSTR Kind, OUT PWCHAR *NewCmdLine);
+#define VetTvLaunchRetry() do { VetTvHookTried = TRUE; lpCommandLine = VetTvCmdLine; \
+    lpApplicationName = NULL; VdmBinaryType = 0; IsWowApp = FALSE; \
+    dwCreationFlags &= ~(CREATE_FORCEDOS | CREATE_SEPARATE_WOW_VDM | CREATE_SHARED_WOW_VDM); \
+    SkipSaferAndAppCompat = TRUE; goto AppNameRetry; } while (0)
+
 /* FUNCTIONS ****************************************************************/
 
 VOID
@@ -3442,6 +3451,8 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     UNICODE_STRING VdmString, VdmUnicodeEnv;
     BOOLEAN IsWowApp;
     PBASE_CHECK_VDM CheckVdmMsg;
+    PWCHAR VetTvCmdLine; /* VETTV: freed in Quickie */
+    BOOLEAN VetTvHookTried; /* VETTV: hook runs at most once per call */
 
     /* Zero out the initial core variables and handles */
     QuerySection = FALSE;
@@ -3498,6 +3509,8 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     VdmWaitObject = NULL;
     UseVdmReserve = FALSE;
     IsWowApp = FALSE;
+    VetTvCmdLine = NULL; /* VETTV */
+    VetTvHookTried = FALSE; /* VETTV */
 
     /* Set message structures */
     CreateProcessMsg = &CsrMsg[0].Data.CreateProcessRequest;
@@ -4266,6 +4279,20 @@ StartScan:
         }
     }
 
+    /* VetTV: DOS MZ (PROTECT / NOT_MZ .com/.exe/.pif), Borland extender NE (PROTECT) and
+     * OS/2 NE (NE_FORMAT) go to vetvdm.exe HERE, before the 64-bit rewrite below turns them
+     * into ERROR_EXE_MACHINE_TYPE_MISMATCH. Runs on every arch (i386 too) and in the WoW64
+     * i386 kernel32. Safer has already run above. Fails open: hook off or no vetvdm.exe
+     * leaves the stock LiberNT path. Win16 NE (WIN_16) keeps its site in the switch. */
+    if (!VetTvHookTried &&
+        ((Status == STATUS_INVALID_IMAGE_PROTECT) ||
+         (Status == STATUS_INVALID_IMAGE_NE_FORMAT) ||
+         ((Status == STATUS_INVALID_IMAGE_NOT_MZ) && BaseIsDosApplication(&PathName, Status))) &&
+        VetTvRedirectToVdm(PathBuffer ? PathBuffer : lpApplicationName, lpCommandLine, L"dos", &VetTvCmdLine))
+    {
+        VetTvLaunchRetry();
+    }
+
     ImageError = ERROR_BAD_EXE_FORMAT;
     if ((sizeof(PVOID) > sizeof(ULONG)) &&
         ((Status == STATUS_INVALID_IMAGE_PROTECT) ||
@@ -4284,6 +4311,14 @@ StartScan:
             /* 16-bit binary. Should we use WOW or does the caller force VDM? */
             if (!(dwCreationFlags & CREATE_FORCEDOS))
             {
+                /* VetTV: Win16 NE. --image is PathBuffer, else lpApplicationName (NameBuffer). */
+                /* VETTV: not rewritten on 64-bit, so this site serves amd64 and i386. */
+                if (!VetTvHookTried &&
+                    VetTvRedirectToVdm(PathBuffer ? PathBuffer : lpApplicationName, lpCommandLine, L"win16", &VetTvCmdLine))
+                {
+                    VetTvLaunchRetry();
+                }
+
                 /* Remember that we're launching WOW */
                 IsWowApp = TRUE;
 
@@ -4431,6 +4466,14 @@ StartScan:
             {
                 /* We're launching a DOS application */
                 VdmBinaryType = BINARY_TYPE_DOS;
+
+                /* VetTV: second chance for CREATE_FORCEDOS Win16 dropping down from the WIN_16 case
+                 * (DOS statuses were already offered to the hook before the 64-bit rewrite). */
+                if (!VetTvHookTried &&
+                    VetTvRedirectToVdm(PathBuffer ? PathBuffer : lpApplicationName, lpCommandLine, L"dos", &VetTvCmdLine))
+                {
+                    VetTvLaunchRetry();
+                }
 
                 /* Based on the caller environment, create a VDM one */
                 Result = BaseCreateVDMEnvironment(lpEnvironment,
@@ -5631,6 +5674,9 @@ VdmShortCircuit:
     ThreadHandle = NULL;
 
 Quickie:
+    /* VetTV: hook command line (vettv_vdm.c) */
+    if (VetTvCmdLine) RtlFreeHeap(RtlGetProcessHeap(), 0, VetTvCmdLine); /* VETTV */
+
     /* Free the debugger command line if one was allocated */
     if (DebuggerCmdLine) RtlFreeHeap(RtlGetProcessHeap(), 0, DebuggerCmdLine);
 

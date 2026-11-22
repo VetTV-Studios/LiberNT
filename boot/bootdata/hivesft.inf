@@ -968,6 +968,11 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewSta
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace\{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}","",0x00000000,"ControlPanelStartupPage"
 
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",,0x00000012
+
+; VetTV RetroOS: turn the kernel32 DOS/Win16 launch hook on (dll/win32/kernel32/client/vettv_vdm.c).
+; A missing key or 0 keeps stock LiberNT behavior. The hook starts %SystemRoot%\System32\vetvdm.exe.
+HKLM,"SOFTWARE\VetTV\RetroOS\VDM","HookEnabled",0x00010001,0x00000001
+
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnceEx",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Setup",,0x00000012
