@@ -1,0 +1,548 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ *
+ * PROJECT:  VetTV Retro OS
+ * FILE:     modules/vettv/vetvdm/vetvdm/main.c
+ * PURPOSE:  vetvdm.exe orchestration: parse, route, launch, and exit.
+ *
+ * Copyright (C) 2026 VetTV
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ */
+
+#include "host.h"
+
+#include "win32.h"
+#include "route.h"
+#include "vcore_util.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define VETVDM_VERSION_TEXT "vetvdm 0.1\n"
+
+static const char g_help[] =
+    "vetvdm 0.1\n"
+    "Usage: vetvdm.exe [options] [--] <program> [args]\n"
+    "       vetvdm.exe --from-hook --kind=dos|win16 --image=<path> -- <command>\n"
+    "\n"
+    "  --kind=dos|win16|auto     Image kind (default auto)\n"
+    "  --layer=dosboxx|winevdm|ntvdm|win31\n"
+    "  --profile=<id or path.json>\n"
+    "  --image=<path>            Full image path (wins over the program token)\n"
+    "  --cwd=<dir>\n"
+    "  --log=<file>\n"
+    "  --keep-conf               Leave the generated dosbox-x.conf in place\n"
+    "  --dry-run                 Print the layer and conf, then exit 0\n"
+    "  --caller=shell            Mark a launch from vettvshell in vetvdm.log\n"
+    "  --from-hook               Keep the caller's console and working directory\n"
+    "  --version\n"
+    "  --help\n";
+
+/*
+ * Bug #2: append one line to <temp>\vetvdm.log and flush it to disk
+ * before the layer starts, so the profile choice survives a hard
+ * power-off while the game is running. The same line also goes to the
+ * shared C:\VetTV\logs\vetvdm.log (write_log_early).
+ */
+static void
+note_launch(host *st)
+{
+    WCHAR path[MAX_PATH];
+    HANDLE file;
+    char line[160];
+    const char *src = vcore_profile_src_name(st->profile.src);
+    DWORD len, wrote = 0;
+
+    if (!st->have_temp || !join_path(path, MAX_PATH, st->temp, L"vetvdm.log"))
+        return;
+    _snprintf(line, sizeof(line), "launch profile=%s (%s)\r\n",
+              st->profile.id[0] ? st->profile.id : "-", src ? src : "-");
+    line[sizeof(line) - 1] = 0;
+    len = (DWORD)strlen(line);
+    write_log_early(st, line);
+    file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                      OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+    WriteFile(file, line, len, &wrote, NULL);
+    FlushFileBuffers(file);
+    CloseHandle(file);
+}
+
+/* Inheritable <temp>\dosbox-x.out for the layer's stdout and stderr. */
+static HANDLE
+open_layer_out(const host *st)
+{
+    WCHAR path[MAX_PATH];
+    SECURITY_ATTRIBUTES sa;
+
+    if (!st->have_temp || !join_path(path, MAX_PATH, st->temp, L"dosbox-x.out"))
+        return NULL;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+    /* Write-through: every write the child makes reaches the disk. */
+    return CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       &sa, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
+}
+
+static DWORD
+launch_layer(host *st, int layer, WCHAR *command, DWORD *exit_code, DWORD *os_error)
+{
+    vcore_job job;
+    HANDLE out = NULL;
+    const WCHAR *app = NULL;
+    DWORD status;
+
+    memset(&job, 0, sizeof(job));
+    if (layer == VETVDM_LAYER_DOSBOXX || layer == VETVDM_LAYER_WIN31)
+        app = st->dosbox;
+    else if (layer == VETVDM_LAYER_WINEVDM)
+        app = st->wine;
+    else if (layer == VETVDM_LAYER_NTVDM)
+        app = st->image;
+    else
+        return VETVDM_E_INTERNAL;
+    if (!app || !app[0] || !command)
+        return VETVDM_E_NOLAYER;
+    if (layer == VETVDM_LAYER_DOSBOXX || layer == VETVDM_LAYER_WIN31)
+    {
+        note_launch(st);
+        out = open_layer_out(st);
+        if (out == INVALID_HANDLE_VALUE)
+            out = NULL;
+    }
+    status = vcore_launch_in_job(app, command, st->cwd[0] ? st->cwd : NULL, out, &job);
+    if (out)
+    {
+        /* The child holds its own copy; flush and drop ours. */
+        CloseHandle(out);
+        out = NULL;
+    }
+    if (os_error)
+        *os_error = job.os_error;
+    if (status != VETVDM_OK)
+        return status;
+    if (job.nested)
+        warn_add(st->warn, sizeof(st->warn), "job-nested");
+    status = vcore_job_wait(&job, exit_code);
+    if (layer == VETVDM_LAYER_WINEVDM && st->fresh_wine)
+        fresh_wine_cleanup(st, &job, job.pid);
+    vcore_job_close(&job);
+    if (status != VETVDM_OK)
+        return status;
+    if (layer == VETVDM_LAYER_DOSBOXX || layer == VETVDM_LAYER_WIN31)
+        return read_errorlevel(st->temp, exit_code);
+    return VETVDM_OK;
+}
+
+static void
+cleanup_host(host *st)
+{
+    if (st->have_temp && !st->cmd.keep_conf)
+        vcore_tempdir_remove(st->temp);
+    vetvdm_cmdline_free(&st->cmd);
+    free(st->header);
+    st->header = NULL;
+}
+
+static WCHAR *
+build_command(const host *st, int layer, const WCHAR *conf_path)
+{
+    if (layer == VETVDM_LAYER_DOSBOXX || layer == VETVDM_LAYER_WIN31)
+        return host_command_dosbox(st, conf_path);
+    if (layer == VETVDM_LAYER_WINEVDM)
+        return host_command_wine(st);
+    return host_command_ntvdm(st);
+}
+
+static char *
+command_utf8(const WCHAR *command)
+{
+    char *text;
+    DWORD n;
+    DWORD cap;
+    if (!command)
+        return NULL;
+    n = vcore_w_len(command);
+    cap = n * 3u + 4u;
+    text = (char *)malloc(cap);
+    if (!text)
+        return NULL;
+    if (vcore_wide_to_utf8(command, text, cap) != VETVDM_OK)
+    {
+        free(text);
+        return NULL;
+    }
+    return text;
+}
+
+static DWORD
+emit_dry(host *st, int layer, const char *conf, const WCHAR *command)
+{
+    vcore_dry_input in;
+    vcore_buf text;
+    char image[1024];
+    char cwd[1024];
+    char *cmdline;
+    DWORD status;
+
+    if (vcore_wide_to_utf8(st->image, image, sizeof(image)) != VETVDM_OK)
+        return VETVDM_E_CMDLINE;
+    if (st->cwd[0] && vcore_wide_to_utf8(st->cwd, cwd, sizeof(cwd)) != VETVDM_OK)
+        return VETVDM_E_CMDLINE;
+    if (!st->cwd[0])
+        cwd[0] = 0;
+    cmdline = command_utf8(command);
+    memset(&in, 0, sizeof(in));
+    in.layer = vetvdm_layer_name(layer);
+    in.kind = vetvdm_kind_name(st->kind);
+    in.caller = st->cmd.from_hook ? "hook" :
+        ((st->cmd.from_shell || st->cmd.profile[0]) ? "shell" : "cli");
+    in.profile_id = st->profile.id;
+    in.profile_src = vcore_profile_src_name(st->profile.src);
+    in.image = image;
+    in.sha256 = st->sha;
+    in.cwd = cwd;
+    in.cmdline = cmdline ? cmdline : "";
+    in.conf = conf;
+    in.note = st->warn[0] ? st->warn : NULL;
+    status = vcore_dry_run_text(&in, &text);
+    free(cmdline);
+    if (status != VETVDM_OK)
+        return status;
+    if (console_attach(1))
+        console_write(text.data ? text.data : "");
+    vcore_buf_free(&text);
+    st->dry_ran = 1;
+    return VETVDM_OK;
+}
+
+static DWORD
+do_dry(host *st)
+{
+    vcore_buf conf;
+    WCHAR conf_path[MAX_PATH];
+    WCHAR *command = NULL;
+    DWORD status = VETVDM_OK;
+    const char *conf_text = NULL;
+    int layer = st->layer;
+
+    vcore_buf_init(&conf);
+    conf_path[0] = 0;
+    locate_layers(st);
+    if ((layer == VETVDM_LAYER_DOSBOXX || layer == VETVDM_LAYER_WIN31) && !st->dosbox_ok)
+        warn_add(st->warn, sizeof(st->warn), "dosbox-missing");
+    if (layer == VETVDM_LAYER_WINEVDM && !st->wine_ok)
+        warn_add(st->warn, sizeof(st->warn), "wine-missing");
+    if (layer == VETVDM_LAYER_WIN31 && !st->win31_ok)
+        warn_add(st->warn, sizeof(st->warn), "win31-missing");
+
+    if (layer == VETVDM_LAYER_DOSBOXX ||
+        (layer == VETVDM_LAYER_WIN31 && st->win31_ok))
+    {
+        status = build_conf(st, layer == VETVDM_LAYER_WIN31, &conf, conf_path, MAX_PATH);
+        if (status != VETVDM_OK)
+        {
+            vcore_buf_free(&conf);
+            return status;
+        }
+        status = write_conf(conf_path, conf.data ? conf.data : "");
+        if (status != VETVDM_OK)
+        {
+            vcore_buf_free(&conf);
+            return status;
+        }
+        conf_text = conf.data;
+    }
+    if (layer == VETVDM_LAYER_WIN31 && !st->win31_ok)
+    {
+        command = (WCHAR *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 16 * sizeof(WCHAR));
+        if (!command)
+        {
+            vcore_buf_free(&conf);
+            return VETVDM_E_INTERNAL;
+        }
+        command[0] = L'-';
+    }
+    else
+        command = build_command(st, layer, conf_path[0] ? conf_path : NULL);
+    if (!command && (layer == VETVDM_LAYER_DOSBOXX || layer == VETVDM_LAYER_WIN31 ||
+                     layer == VETVDM_LAYER_WINEVDM || layer == VETVDM_LAYER_NTVDM))
+    {
+        vcore_buf_free(&conf);
+        st->why = "bad command line";
+        return VETVDM_E_CMDLINE;
+    }
+    status = emit_dry(st, layer, conf_text, command);
+    HeapFree(GetProcessHeap(), 0, command);
+    vcore_buf_free(&conf);
+    return status;
+}
+
+/*
+ * Number of processes on our console, or 0 when there is none or the call
+ * fails (ReactOS csrss can return 0 here). The buffer is large enough that
+ * a typed launch (cmd.exe + vetvdm, maybe a parent batch) never truncates.
+ */
+static DWORD
+console_process_count(void)
+{
+    DWORD ids[16];
+
+    if (!GetConsoleWindow())
+        return 0;
+    return GetConsoleProcessList(ids, 16);
+}
+
+/*
+ * A double-clicked console program owns a new console. Drop it before the
+ * game so the window does not stay empty. cmd.exe shares its console, and
+ * --from-hook keeps the caller's console for the DOSBox-X child.
+ *
+ * PR #28 freeze (typed in cmd, 2/10): only free when the count is exactly
+ * 1. Any doubt (0 = unknown, >1 = shared with cmd) keeps the console, so
+ * vetvdm never detaches from a console cmd.exe is still waiting on.
+ * Returns the action for the early log line.
+ */
+static const char *
+release_own_console(const host *st, DWORD count)
+{
+    /*
+     * PR #28 item 2: this used to return "keep-hook" for every --from-hook
+     * launch, so a hook launch from a GUI parent (Start->Run, Explorer via
+     * the hook) kept vetvdm's own new console visible (QA: console=1:keep-hook).
+     * A count of 1 is only ever vetvdm's own console, so free it; a typed
+     * cmd launch shares cmd's console (count >= 2) and keeps it.
+     */
+    const char *act = vetvdm_console_action(st ? st->cmd.from_hook : 0, count);
+    if (act[0] == 'f')
+        FreeConsole();
+    return act;
+}
+
+/*
+ * Write the route to the shared log and flush it BEFORE any console change
+ * or child launch, for every layer (the old note_launch only covered
+ * DOSBox-X). A guest that freezes after this point still leaves a line.
+ */
+static void
+note_route(host *st, int layer, DWORD console_n, const char *console_act)
+{
+    char line[320];
+    const char *hint = st->cmd.type_hint == VETVDM_TYPE_NE ? "ne" :
+        (st->cmd.type_hint == VETVDM_TYPE_MZ ? "mz" : "-");
+
+    _snprintf(line, sizeof(line),
+              "route pid=%lu caller=%s kind=%s type=%s layer=%s profile=%s console=%lu:%s"
+              " fresh_winevdm=%d otvdm_pre=%ld wow_ini=%d\r\n",
+              (unsigned long)GetCurrentProcessId(),
+              st->cmd.from_hook ? "hook" : ((st->cmd.from_shell || st->cmd.profile[0]) ? "shell" : "cli"),
+              vetvdm_kind_name(st->kind), hint, vetvdm_layer_name(layer),
+              st->profile.id[0] ? st->profile.id : "-",
+              (unsigned long)console_n, console_act,
+              st->fresh_wine, layer == VETVDM_LAYER_WINEVDM ? st->otvdm_pre : -1L,
+              layer == VETVDM_LAYER_WINEVDM ? st->wow_ini : -1);
+    line[sizeof(line) - 1] = 0;
+    write_log_early(st, line);
+}
+
+static DWORD
+do_launch(host *st)
+{
+    int desired = st->layer;
+    int layer;
+    DWORD err = VETVDM_OK;
+    DWORD code = 1;
+    DWORD os_error = 0;
+    DWORD status;
+    vcore_buf conf;
+    WCHAR conf_path[MAX_PATH];
+    WCHAR *command = NULL;
+
+    locate_layers(st);
+    layer = vetvdm_layer_for_launch(desired, st->forced, st->dosbox_ok, st->wine_ok,
+                                  st->win31_ok, &err);
+    if (err != VETVDM_OK)
+    {
+        st->layer = desired;
+        if (err == VETVDM_E_NOLAYER)
+        {
+            const WCHAR *missing = L"";
+            char utf[MAX_PATH * 3];
+            if (desired == VETVDM_LAYER_DOSBOXX)
+                missing = st->policy.dosboxx_path;
+            else if (desired == VETVDM_LAYER_WINEVDM)
+                missing = st->policy.winevdm_path;
+            if (missing && missing[0] &&
+                vcore_wide_to_utf8(missing, utf, sizeof(utf)) == VETVDM_OK)
+                warn_add(st->warn, sizeof(st->warn), utf);
+            st->why = "layer executable missing";
+        }
+        else
+            st->why = "Windows 3.1 path missing";
+        return err;
+    }
+    if (layer != desired)
+    {
+        warn_add(st->warn, sizeof(st->warn), "layer-fallback");
+        st->layer = layer;
+    }
+
+retry:
+    /* LiberNT: no NTVDM fallback without ntvdm.exe (always on 64-bit). */
+    if (layer == VETVDM_LAYER_NTVDM && !host_ntvdm_present())
+    {
+        warn_add(st->warn, sizeof(st->warn), "ntvdm-absent");
+        st->layer = layer;
+        st->why = "DOS player not installed and NTVDM is not available on this system";
+        return VETVDM_E_NOLAYER;
+    }
+    vcore_buf_init(&conf);
+    conf_path[0] = 0;
+    if (layer == VETVDM_LAYER_DOSBOXX || layer == VETVDM_LAYER_WIN31)
+    {
+        status = build_conf(st, layer == VETVDM_LAYER_WIN31, &conf, conf_path, MAX_PATH);
+        if (status != VETVDM_OK)
+        {
+            vcore_buf_free(&conf);
+            return status;
+        }
+        status = write_conf(conf_path, conf.data ? conf.data : "");
+        vcore_buf_free(&conf);
+        if (status != VETVDM_OK)
+            return status;
+    }
+    command = build_command(st, layer, conf_path[0] ? conf_path : NULL);
+    if (!command)
+    {
+        st->why = "bad command line";
+        return VETVDM_E_CMDLINE;
+    }
+    {
+        DWORD n = console_process_count();
+        const char *act = vetvdm_console_action(st->cmd.from_hook, n);
+        if (layer == VETVDM_LAYER_WINEVDM)
+            fresh_wine_prepare(st);
+        note_route(st, layer, n, act);
+        release_own_console(st, n);
+    }
+    status = launch_layer(st, layer, command, &code, &os_error);
+    HeapFree(GetProcessHeap(), 0, command);
+    command = NULL;
+    /*
+     * WineVDM (or the Win3.1 guest) found but could not start: walk the
+     * Win16 fallback order instead of failing. Forced layers do not fall back.
+     */
+    if (!st->forced && st->kind == VETVDM_KIND_WIN16 &&
+        (layer == VETVDM_LAYER_WINEVDM || layer == VETVDM_LAYER_WIN31) &&
+        status == VETVDM_E_START)
+    {
+        int next = vetvdm_win16_next_layer(layer, st->dosbox_ok, st->win31_ok);
+        char note[48];
+        wsprintfA(note, "%s-start-failed:err=%lu", vetvdm_layer_name(layer),
+                  (unsigned long)os_error);
+        warn_add(st->warn, sizeof(st->warn), note);
+        if (next != VETVDM_LAYER_NONE)
+        {
+            warn_add(st->warn, sizeof(st->warn), "layer-fallback");
+            layer = next;
+            st->layer = layer;
+            goto retry;
+        }
+    }
+    /*
+     * NTVDM reached only as a fallback means the real DOS player is not
+     * installed. If NTVDM cannot start the program either, report the
+     * missing layer (0xE0000004), not a crash, and keep the cause in the log.
+     */
+    if (layer == VETVDM_LAYER_NTVDM && desired != VETVDM_LAYER_NTVDM &&
+        (status == VETVDM_E_START ||
+         (status == VETVDM_OK && code == VETVDM_E_START)))
+    {
+        char note[48];
+        wsprintfA(note, "ntvdm-failed:err=%lu,exit=0x%08lX",
+                  (unsigned long)os_error, (unsigned long)code);
+        warn_add(st->warn, sizeof(st->warn), note);
+        st->why = "DOS player not installed and NTVDM could not start the program";
+        return VETVDM_E_NOLAYER;
+    }
+    if (status != VETVDM_OK)
+    {
+        st->why = why_for(status, NULL);
+        return status;
+    }
+    return code;
+}
+
+static DWORD
+run(void)
+{
+    host st;
+    DWORD code;
+
+    memset(&st, 0, sizeof(st));
+    st.started = GetTickCount();
+    st.log_level = 1;
+    st.kind = VETVDM_KIND_AUTO;
+    st.wow_ini = -1;
+    st.otvdm_pre = -1;
+    st.fresh_wine = fresh_wine_enabled();
+    code = vetvdm_cmdline_parse(GetCommandLineW(), &st.cmd);
+    if (code != VETVDM_OK)
+    {
+        st.why = st.cmd.error ? st.cmd.error : "bad command line";
+        goto done;
+    }
+    if (st.cmd.help || st.cmd.version)
+    {
+        console_attach(1);
+        console_write(st.cmd.help ? g_help : VETVDM_VERSION_TEXT);
+        st.skip_log = 1;
+        code = VETVDM_OK;
+        goto done;
+    }
+    if (st.cmd.from_hook)
+        console_attach(0);
+
+    code = load_policy(&st);
+    if (code != VETVDM_OK)
+        goto done;
+    code = resolve_image(&st);
+    if (code != VETVDM_OK)
+        goto done;
+    code = route_image(&st);
+    if (code != VETVDM_OK)
+        goto done;
+    if (st.cmd.dry_run)
+        code = do_dry(&st);
+    else
+        code = do_launch(&st);
+
+done:
+    if (code >= 0xE0000000u && !st.why)
+        st.why = why_for(code, NULL);
+    if (!st.dry_ran)
+        write_log(&st, code);
+    else if (st.log_level >= 2)
+        write_log(&st, code);
+    if (code >= 0xE0000000u)
+        show_error(st.cmd.from_hook, code, why_for(code, st.why));
+    cleanup_host(&st);
+    return code;
+}
+
+int
+wmain(int argc, WCHAR **argv)
+{
+    (void)argc;
+    (void)argv;
+    ExitProcess(run());
+    return 0;
+}

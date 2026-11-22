@@ -1,0 +1,28 @@
+{
+  "id": "omf2097-2.1",
+  "match": {
+    "name": "OMF.EXE",
+    "size": 4448
+  },
+  "layer": "dosboxx",
+  "dosbox": {
+    "cycles": "fixed 30000",
+    "machine": "svga_s3",
+    "memsize": "16",
+    "mpu401": "none",
+    "sbtype": "sb16",
+    "extra": {
+      "cpu": {
+        "core": "normal",
+        "cputype": "486",
+        "always report triple fault": "true"
+      },
+      "dos": {
+        "xms": "true",
+        "ems": "true",
+        "umb": "true"
+      }
+    }
+  },
+  "notes": "OMF 2097 v2.1 freeware (OMF.EXE is a 4448-byte loader). G006 (gate-run4): fixed 486-class speed on the normal core instead of cycles=auto, explicit XMS/EMS/UMB. Sound Blaster left at DOSBox-X defaults, which gave full-scale menu PCM in run 4."
+}

@@ -27,6 +27,7 @@ set(WOW64_I386_AUXILIARY_MODULES ${COMPAT_RUNTIME_AUXILIARY_MODULES} fusion fusi
 set(WOW64_I386_ALIASES ${COMPAT_RUNTIME_ALIASES})
 
 set(WOW64_I386_EXECUTABLES
+    vetvdm # VetTV: 32-bit callers are redirected to SysWOW64\vetvdm.exe
     arp
     at
     attrib

@@ -29,6 +29,11 @@ endif()
 
 add_subdirectory(wallpapers)
 
+# VetTV RetroOS: vetvdm.exe (System32, and SysWOW64 via sdk/cmake/wow64_targets.cmake)
+# plus the C:\VetTV\ payload (profiles always; engines only with VETTV_PAYLOAD_DIR).
+add_subdirectory(vettv/vetvdm)
+include(vettv/payload/payload.cmake)
+
 add_subdirectory(n64emu)
 add_subdirectory(fexbench)
 add_subdirectory(rostests/tests/emulation)
