@@ -22,7 +22,7 @@
 
 set(VETTV_PAYLOAD_DIR "" CACHE PATH "VetTV: optional payload dir with dosbox-x/ and winevdm/ (empty = profiles only)")
 set(VETTV_DOSBOXX_SHA256 "4ac5774f987c2fbde68893646877ce0cbef8a793f58a195f6fbb52d949a6cc96" CACHE STRING "VetTV: pinned dosbox-x.exe sha256")
-set(VETTV_KRNL386_SHA256 "498001879ed9952ef169f3c8925c26d77d4e35b362f79c47fbfb1e8d6e68ae8f" CACHE STRING "VetTV: pinned (patched) winevdm krnl386.exe16 sha256")
+set(VETTV_KRNL386_SHA256 "89eaf2bd8560c75ccbc8e16ef95474c60bb76151a01b24c10f85ee03fd0906fd" CACHE STRING "VetTV: pinned (patched) winevdm krnl386.exe16 sha256 (dosmem-low-guard + no-strnlen + reactos-family-subsystemtib)")
 
 set(_vt_stage "${CMAKE_CURRENT_LIST_DIR}|profiles")
 
