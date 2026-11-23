@@ -5,6 +5,9 @@ Signature = "$Windows NT$"
 [SystemTrees]
 Windows = "\"
 "Program Files" = "\Program Files"
+; VetTV RetroOS: DOSBox-X, WineVDM (+ corresponding source) and vetvdm profiles,
+; the paths vetvdm.exe expects at %SystemDrive%\VetTV (modules/vettv/payload).
+VetTV = "\VetTV"
 
 ; A directory listed here is created empty.
 [SystemTrees.Exclude]

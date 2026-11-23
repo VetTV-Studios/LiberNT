@@ -5,8 +5,9 @@
 # Included from modules/CMakeLists.txt. LiberNT's boot CD is a live tree (the
 # ISO root becomes the system drive and "reactos/" becomes "Windows/"), so a
 # DESTINATION of VetTV/<dir> lands at C:\VetTV\<dir> on the live desktop and
-# in the preinstall image. No txtsetup.sif edits and no reactos.cab
-# (the ReactOS 0.4.16/0.4.17 payload.cmake needed both).
+# in the preinstall image. Setup copies only the [SystemTrees] listed in
+# boot/bootdata/txtsetup.sif, so that list carries VetTV = "\VetTV" for the
+# installed system (QA dadd54b7: no C:\VetTV after Setup). No reactos.cab.
 #
 # profiles/ (vetvdm per-game DOSBox-X profiles, by-name/ and by-hash/<sha256>.json)
 # is ours, GPL-compatible JSON next to this file, so it always ships.
@@ -22,6 +23,7 @@
 
 set(VETTV_PAYLOAD_DIR "" CACHE PATH "VetTV: optional payload dir with dosbox-x/ and winevdm/ (empty = profiles only)")
 set(VETTV_DOSBOXX_SHA256 "4ac5774f987c2fbde68893646877ce0cbef8a793f58a195f6fbb52d949a6cc96" CACHE STRING "VetTV: pinned dosbox-x.exe sha256")
+set(VETTV_DOSBOXX_SRC_SHA256 "992ea538ea858f9fb196b39de2276ce3048c731965e144e6288202abed109782" CACHE STRING "VetTV: pinned DOSBox-X corresponding source tarball sha256 (tag dosbox-x-v2026.08.31)")
 set(VETTV_KRNL386_SHA256 "89eaf2bd8560c75ccbc8e16ef95474c60bb76151a01b24c10f85ee03fd0906fd" CACHE STRING "VetTV: pinned (patched) winevdm krnl386.exe16 sha256 (dosmem-low-guard + no-strnlen + reactos-family-subsystemtib)")
 
 set(_vt_stage "${CMAKE_CURRENT_LIST_DIR}|profiles")
@@ -37,6 +39,16 @@ if(VETTV_PAYLOAD_DIR AND NOT WOW64_I386_RUNTIME)
     file(SHA256 "${VETTV_PAYLOAD_DIR}/winevdm/krnl386.exe16" _vt_k386_sha)
     if(NOT _vt_k386_sha STREQUAL VETTV_KRNL386_SHA256)
         message(FATAL_ERROR "VetTV: winevdm/krnl386.exe16 sha256 ${_vt_k386_sha} != pin ${VETTV_KRNL386_SHA256} (never ship the stock a1111648...)")
+    endif()
+    set(_vt_dbx_src "${VETTV_PAYLOAD_DIR}/dosbox-x-source/dosbox-x-src-dosbox-x-v2026.08.31.tar.gz")
+    if(EXISTS "${VETTV_PAYLOAD_DIR}/dosbox-x-source")
+        if(NOT EXISTS "${_vt_dbx_src}")
+            message(FATAL_ERROR "VetTV: dosbox-x-source/ needs ${_vt_dbx_src}")
+        endif()
+        file(SHA256 "${_vt_dbx_src}" _vt_dbx_src_sha)
+        if(NOT _vt_dbx_src_sha STREQUAL VETTV_DOSBOXX_SRC_SHA256)
+            message(FATAL_ERROR "VetTV: DOSBox-X source sha256 ${_vt_dbx_src_sha} != pin ${VETTV_DOSBOXX_SRC_SHA256}")
+        endif()
     endif()
     message(STATUS "VetTV: payload from ${VETTV_PAYLOAD_DIR} (dosbox-x ${_vt_dbx_sha}, krnl386 ${_vt_k386_sha})")
     foreach(_vt_top dosbox-x winevdm winevdm-source dosbox-x-source)

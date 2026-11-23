@@ -214,6 +214,18 @@ vetvdm_layer_for_launch(int desired, int forced,
 }
 
 const char *
+vetvdm_nolayer_why(int kind, int ntvdm_tried)
+{
+    if (kind == VETVDM_KIND_WIN16)
+        return ntvdm_tried ?
+            "Win16 layer (WineVDM) not installed and NTVDM could not start the program" :
+            "Win16 layer (WineVDM) not installed and NTVDM is not available on this system";
+    return ntvdm_tried ?
+        "DOS player (DOSBox-X) not installed and NTVDM could not start the program" :
+        "DOS player (DOSBox-X) not installed and NTVDM is not available on this system";
+}
+
+const char *
 vetvdm_console_action(int from_hook, DWORD count)
 {
     (void)from_hook;

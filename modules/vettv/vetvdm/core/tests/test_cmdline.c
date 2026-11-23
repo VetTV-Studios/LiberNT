@@ -338,6 +338,10 @@ test_console_and_flag(void)
     check(strcmp(vetvdm_console_action(0, 3), "keep-shared") == 0, "batch keeps console");
     check(strcmp(vetvdm_console_action(1, 0), "keep-unknown") == 0, "hook unknown keeps");
     check(strcmp(vetvdm_console_action(0, 0), "keep-unknown") == 0, "unknown keeps");
+    check(strstr(vetvdm_nolayer_why(VETVDM_KIND_WIN16, 0), "Win16 layer (WineVDM)") != NULL, "nolayer win16 names WineVDM");
+    check(strstr(vetvdm_nolayer_why(VETVDM_KIND_WIN16, 1), "DOS player") == NULL, "nolayer win16 never says DOS player");
+    check(strstr(vetvdm_nolayer_why(VETVDM_KIND_DOS, 0), "DOS player (DOSBox-X)") != NULL, "nolayer dos names DOSBox-X");
+    check(strstr(vetvdm_nolayer_why(VETVDM_KIND_DOS, 1), "could not start") != NULL, "nolayer dos ntvdm tried");
     check(vetvdm_flag_on(L"1") == 1, "flag 1");
     check(vetvdm_flag_on(L"YES") == 1, "flag YES");
     check(vetvdm_flag_on(L"true") == 1, "flag true");

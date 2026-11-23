@@ -72,6 +72,14 @@ const char *vetvdm_wine_lookup_step(int configured_ok, int bundled_ok,
 const char *vetvdm_console_action(int from_hook, DWORD count);
 
 /*
+ * Text for 0xE0000004 when the NTVDM fallback is all that is left. Names the
+ * layer that is actually missing for this kind of program: the Win16 layer
+ * (WineVDM) for Win16, the DOS player (DOSBox-X) for DOS and OS/2 NE.
+ * ntvdm_tried is 1 when NTVDM exists but could not start the program.
+ */
+const char *vetvdm_nolayer_why(int kind, int ntvdm_tried);
+
+/*
  * VETVDM_FRESH_WINEVDM / vetvdm.ini FreshWineVDM value: 1 for "1", "yes",
  * "true", "on" (any case), else 0. NULL or empty is 0.
  */

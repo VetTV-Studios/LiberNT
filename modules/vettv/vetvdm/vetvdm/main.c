@@ -401,7 +401,7 @@ retry:
     {
         warn_add(st->warn, sizeof(st->warn), "ntvdm-absent");
         st->layer = layer;
-        st->why = "DOS player not installed and NTVDM is not available on this system";
+        st->why = vetvdm_nolayer_why(st->kind, 0);
         return VETVDM_E_NOLAYER;
     }
     vcore_buf_init(&conf);
@@ -458,8 +458,8 @@ retry:
         }
     }
     /*
-     * NTVDM reached only as a fallback means the real DOS player is not
-     * installed. If NTVDM cannot start the program either, report the
+     * NTVDM reached only as a fallback means the real DOS player (or, for
+     * Win16, WineVDM) is not installed. If NTVDM cannot start the program either, report the
      * missing layer (0xE0000004), not a crash, and keep the cause in the log.
      */
     if (layer == VETVDM_LAYER_NTVDM && desired != VETVDM_LAYER_NTVDM &&
@@ -470,7 +470,7 @@ retry:
         wsprintfA(note, "ntvdm-failed:err=%lu,exit=0x%08lX",
                   (unsigned long)os_error, (unsigned long)code);
         warn_add(st->warn, sizeof(st->warn), note);
-        st->why = "DOS player not installed and NTVDM could not start the program";
+        st->why = vetvdm_nolayer_why(st->kind, 1);
         return VETVDM_E_NOLAYER;
     }
     if (status != VETVDM_OK)
