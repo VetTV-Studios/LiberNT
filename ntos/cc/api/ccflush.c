@@ -79,6 +79,7 @@ CcPurgeCacheSection(
     ULONG64 Offset = (FileOffset != NULL) ? (ULONG64)FileOffset->QuadPart : 0;
     ULONG64 Bytes = (FileOffset != NULL && Length != 0) ? Length : 0;
     BOOLEAN Purged = TRUE;
+    BOOLEAN ImageFlushed = FALSE;
 
     if (Bytes != 0)
     {
@@ -104,6 +105,14 @@ CcPurgeCacheSection(
         Purged = MiSegmentPurge(NtMap->Control->Segment, Offset, Bytes);
         if (Purged && Offset == 0 && Bytes == 0 && (Flags & UNINITIALIZE_CACHE_MAPS))
             NtMap->PurgeOnClose = TRUE;
+
+        /* Flush the image section while the map reference still keeps the
+         * file object, and with it the caller's section object pointers,
+         * alive. Dropping that reference can close the last stream file
+         * object and let the file system free the FCB that owns them. */
+        if (Purged && FileOffset == NULL && !MmFlushImageSection(SectionObjectPointer, MmFlushForWrite))
+            Purged = FALSE;
+        ImageFlushed = TRUE;
         CcNtDereferenceMap(NtMap);
     }
     else
@@ -112,15 +121,32 @@ CcPurgeCacheSection(
 
         if (Control != NULL)
         {
+            BOOLEAN CloseData;
+
             Purged = MiSegmentPurge(Control->Segment, Offset, Bytes);
-            if (Purged && Offset == 0 && Bytes == 0)
+            /* Decide the data section close from the data purge alone, as
+             * before; a busy image section must not keep the data section
+             * cached. */
+            CloseData = Purged && Offset == 0 && Bytes == 0;
+
+            /* As above: flush the image section before the data section
+             * reference goes, because closing the data section can free the
+             * section object pointers. */
+            if (Purged && FileOffset == NULL && !MmFlushImageSection(SectionObjectPointer, MmFlushForWrite))
+                Purged = FALSE;
+            ImageFlushed = TRUE;
+
+            if (CloseData)
                 MiSegmentDereferenceAndClose(Control->Segment);
             else
                 MiDereferenceControlArea(Control);
         }
     }
 
-    if (Purged && FileOffset == NULL && !MmFlushImageSection(SectionObjectPointer, MmFlushForWrite))
+    /* No data section reference was taken: the caller's own reference is
+     * the only one, so the pointers stay valid for the image flush. */
+    if (!ImageFlushed && Purged && FileOffset == NULL &&
+        !MmFlushImageSection(SectionObjectPointer, MmFlushForWrite))
         Purged = FALSE;
 
     return Purged;
